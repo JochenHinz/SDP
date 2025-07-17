@@ -1,5 +1,5 @@
 from _types import Singleton, Int, Float
-from util import np, temporary_seed
+from util import np
 
 from abc import abstractmethod
 from typing import Callable
@@ -397,15 +397,3 @@ class Bernoulli(DiscreteDistribution):
     The nth moment is p if n is odd, and 1 - p if n is even.
     """
     return self.p
-
-
-if __name__ == '__main__':
-  test = Normal(0, 1)
-  print(test.sample())
-  print(test.sample(3, 4))
-
-  with temporary_seed(42):
-    print(test.sample(3, 4))
-
-  with temporary_seed(42):
-    print(test.sample(3, 4))
