@@ -6,6 +6,7 @@ from typing import Callable
 from functools import cached_property
 
 from scipy.special import binom, stirling2, factorial
+from scipy import stats
 
 
 class Distribution(Singleton):
@@ -86,6 +87,7 @@ class Distribution(Singleton):
     Return the standard deviation of the distribution.
     """
     return np.sqrt(self.variance)
+    raise NotImplementedError("Credible interval must be implemented in subclasses.")
 
 
 class ContinuousDistribution(Distribution):
@@ -99,6 +101,14 @@ class ContinuousDistribution(Distribution):
 
   def _raw_moment(self, order: Int) -> Float:
     raise NotImplementedError("Raw moments must be implemented in subclasses.")
+
+  @abstractmethod
+  def ppf(self, q: Float) -> Float:
+    ...
+
+  def credible_interval(self, alpha: Float = 0.95) -> tuple[Float, Float]:
+    q = (1 - alpha) / 2.0
+    return self.ppf(q), self.ppf(1 - q)
 
 
 class Normal(ContinuousDistribution):
@@ -134,35 +144,47 @@ class Normal(ContinuousDistribution):
     else:
       raise NotImplementedError("Higher moments are not implemented for Normal distribution.")
 
+  def ppf(self, q: Float) -> Float:
+    return stats.norm(self.mean, self.std).ppf(q)
+
 
 class LogNormal(ContinuousDistribution):
 
-  def __init__(self, mean: Float = 0, std: Float = 1) -> None:
-    self.mean = float(mean)
-    self.std = float(std)
-    assert self.std > 0, "Standard deviation must be positive."
+  @classmethod
+  def from_mean_std(cls, mean: Float, std: Float) -> 'LogNormal':
+    sigma = np.sqrt(np.log(1 + (std / mean) ** 2))
+    mu = np.log(mean) - 0.5 * sigma ** 2
+    return cls(mu, sigma)
+
+  def __init__(self, mu: Float = 0, sigma: Float = 1) -> None:
+    self.mu = float(mu)
+    self.sigma = float(sigma)
+    assert self.sigma > 0, "Standard deviation must be positive."
 
   @cached_property
   def pdf(self) -> Callable:
     """
     Return the probability density function of the log-normal distribution.
     """
-    return lambda x: (np.exp(-(np.log(x) - self.mean) ** 2
-                      / (2 * self.std ** 2))
-                      / (x * self.std * np.sqrt(2 * np.pi)))
+    return lambda x: (np.exp(-(np.log(x) - self.mu) ** 2
+                      / (2 * self.sigma ** 2))
+                      / (x * self.sigma * np.sqrt(2 * np.pi)))
 
   def _sample(self, size: Int) -> np.ndarray:
     """
     Sample from the log-normal distribution.
     """
-    return np.random.lognormal(self.mean, self.std, size=size)
+    return np.random.lognormal(self.mu, self.sigma, size=size)
 
   def _raw_moment(self, order: Int) -> Float:
     """
     Return the moments of the log-normal distribution.
     The nth moment is given by exp(n * mean + 0.5 * n^2 * std^2).
     """
-    return np.exp(order * self.mean + 0.5 * order ** 2 * self.std ** 2)
+    return np.exp(order * self.mu + 0.5 * order ** 2 * self.sigma ** 2)
+
+  def ppf(self, q: Float) -> Float:
+    return stats.lognorm(self.mu, self.sigma).ppf(q)
 
 
 class Uniform(ContinuousDistribution):
@@ -192,6 +214,44 @@ class Uniform(ContinuousDistribution):
     return ((self.high ** (order + 1) - self.low ** (order + 1)) /
             (self.high - self.low)) / (order + 1)
 
+  def ppf(self, q: Float) -> Float:
+    return stats.uniform(self.low, self.high - self.low).ppf(q)
+
+
+class Beta(ContinuousDistribution):
+
+  def __init__(self, a: Float = 1, b: Float = 1) -> None:
+    self.a = float(a)
+    self.b = float(b)
+    assert self.a > 0 and self.b > 0, "Parameters a and b must be positive."
+
+  @cached_property
+  def pdf(self) -> Callable:
+    """
+    Return the probability density function of the beta distribution.
+    """
+    return lambda x: np.where((x >= 0) & (x <= 1),
+                              (x ** (self.a - 1) * (1 - x) ** (self.b - 1)) /
+                              stats.beta(self.a, self.b).pdf(1),
+                              0)
+
+  def _sample(self, size: Int) -> np.ndarray:
+    """
+    Sample from the beta distribution.
+    """
+    return np.random.beta(self.a, self.b, size=size)
+
+  def _raw_moment(self, order: Int) -> Float:
+    if order == 1:
+      return self.a / (self.a + self.b)
+    return (self.a + order - 1) / (self.a + self.b + order - 1) * self._raw_moment(order - 1)
+
+  def ppf(self, q: Float) -> Float:
+    """
+    Return the percent point function (PPF) of the beta distribution.
+    """
+    return stats.beta(self.a, self.b).ppf(q)
+
 
 class Dirac(ContinuousDistribution):
 
@@ -210,6 +270,12 @@ class Dirac(ContinuousDistribution):
 
   def _raw_moment(self, order: Int) -> Float:
     return self.value ** order
+
+  def ppf(self, q: Float) -> Float:
+    """
+    The PPF of a Dirac delta distribution is always the value itself.
+    """
+    return self.value
 
 
 def as_distribution(dist: Distribution) -> Distribution:
@@ -306,7 +372,31 @@ class Poisson(DiscreteDistribution):
     return np.random.poisson(self.lam, size=size)
 
   def _raw_moment(self, order: Int) -> Float:
-    return self.lam ** order
+    return sum( self.lam**i * stirling2(order, i) for i in range(order+1) )
+
+
+class Bernoulli(DiscreteDistribution):
+
+  def __init__(self, p: Float) -> None:
+    self.p = float(p)
+    assert 0 <= self.p <= 1, "Probability p must be in [0, 1]."
+
+  @cached_property
+  def pdf(self) -> Callable:
+    """
+    Return the probability mass function of the Bernoulli distribution.
+    """
+    return lambda x: np.where(x == 1, self.p, np.where(x == 0, 1 - self.p, 0))
+
+  def _sample(self, size: Int) -> np.ndarray:
+    return np.random.binomial(1, self.p, size=size)
+
+  def _raw_moment(self, order: Int) -> Float:
+    """
+    Return the raw moments of the Bernoulli distribution.
+    The nth moment is p if n is odd, and 1 - p if n is even.
+    """
+    return self.p
 
 
 if __name__ == '__main__':
