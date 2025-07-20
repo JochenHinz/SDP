@@ -1,8 +1,8 @@
 from _types import Immutable, Int, Float
-from util import np
+from util import np, frozen
 
 from abc import abstractmethod
-from typing import Callable, Sequence, Optional
+from typing import Callable, Sequence
 from functools import cached_property
 
 from scipy.special import binom, stirling2, factorial
@@ -10,6 +10,11 @@ from scipy import stats
 
 
 class Distribution(Immutable):
+
+  """
+  Base class for distrbutions that can be expressed in closed form.
+  Must have known moments and probability density function (PDF).
+  """
 
   @abstractmethod
   def _sample(self, size: Int) -> np.ndarray:
@@ -29,6 +34,14 @@ class Distribution(Immutable):
   @cached_property
   def shape(self):
     ...
+
+
+class ClosedFormDistribution(Distribution):
+
+  """
+  Base class for distrbutions that can be expressed in closed form.
+  Must have known moments and probability density function (PDF).
+  """
 
   @abstractmethod
   @cached_property
@@ -93,18 +106,38 @@ class Distribution(Immutable):
     """
     return np.sqrt(self.variance)
 
+  def __add__(self, other):
+    raise NotImplementedError("Addition is not implemented for distributions.")
 
-class UnivariateDistribution(Distribution):
+  def __neg__(self):
+    raise NotImplementedError("Negation is not implemented for distributions.")
+
+  def __sub__(self, other):
+    return self + (-other)
+
+  def __mul__(self, other):
+    raise NotImplementedError("Addition is not implemented for distributions.")
+
+
+class ScalarDistribution(ClosedFormDistribution):
+
+  """
+  Non-vectorial distribution.
+  """
 
   def __matmul__(self, other):
-    return ProductDistribution([self, other])
+    """
+    This one should return the product of two distributions, uncorrelated.
+    F(x, y) = F0(x) * F1(y)
+    """
+    raise NotImplementedError
 
   @property
   def shape(self):
     return ()
 
 
-class ContinuousDistribution(UnivariateDistribution):
+class ContinuousDistribution(ScalarDistribution):
 
   @cached_property
   def pdf(self) -> Callable:
@@ -294,17 +327,17 @@ class Dirac(ContinuousDistribution):
     return self.value
 
 
-def as_distribution(dist: Distribution) -> Distribution:
+def as_distribution(dist: ClosedFormDistribution) -> ClosedFormDistribution:
   """
   Ensure that the object is a Distribution.
   If it is not, raise an error.
   """
-  if not isinstance(dist, Distribution):
+  if not isinstance(dist, ClosedFormDistribution):
     return Dirac(dist)
   return dist
 
 
-class DiscreteDistribution(UnivariateDistribution):
+class DiscreteDistribution(ScalarDistribution):
 
   @cached_property
   def pdf(self) -> Callable:
@@ -415,106 +448,34 @@ class Bernoulli(DiscreteDistribution):
     return self.p
 
 
-class ProductDistribution(Distribution):
-  """
-  A distribution representing the product of two independent distributions.
-  """
-
-  # TODO: In the long run we obviously need to implement correlated distributions.
-  #       The independent distribution case should be a special case of that.
-
-  def __init__(self, distributions: UnivariateDistribution | Sequence[UnivariateDistribution]) -> None:
-
-      if isinstance(distributions, UnivariateDistribution):
-        distributions = distributions,
-
-      self.distributions = tuple(map(as_distribution, distributions))
-      assert self.distributions, "At least one distribution must be provided."
-
-      base = {True: ContinuousDistribution,
-              False: DiscreteDistribution}[self.continuous]
-
-      assert all( isinstance(dist, base) for dist in self.distributions ), \
-        NotImplementedError("Mixed distributions are not supported yet.")
-
-  @property
-  def shape(self):
-    return ()
-
-  @cached_property
-  def continuous(self):
-    return isinstance(self.distributions[0], ContinuousDistribution)
-
-  @cached_property
-  def pdf(self) -> Callable:
-    return \
-      lambda x: np.multiply.reduce([dist.pdf(x[..., i])
-                                    for i, dist in enumerate(self.distributions)])
-
-  def _sample(self, size: Int) -> np.ndarray:
-    return np.prod([dist.sample(size) for dist in self.distributions], axis=0)
-
-  def _raw_moment(self, order: Int) -> Float:
-    return np.prod([dist.raw_moment(order) for dist in self.distributions])
-
-  def __len__(self):
-    return len(self.distributions)
-
-
 class VectorialDistribution(Distribution):
 
-  # TODO: for now only vectorial. Tensorial follows later.
-
-  def __init__(self, distributions: Distribution,
-                     dependencies: Optional[Sequence[Sequence[Int]]] = None) -> None:
-
-    # We handle only ProductDistribution in this class.
-    # If another distribution is passed, it will simply be coerced.
-    self.distributions = tuple(map(ProductDistribution, distributions))
-    assert all( dist.continuous == self.distributions[0].continuous for dist in self.distributions ), \
-      NotImplementedError("Mixed distributions are not supported yet.")
-
-    if dependencies is None:
-      dependencies = tuple( tuple(range(len(dist))) for dist in self.distributions )
-
-    self.dependencies = tuple( tuple(int(i) for i in dep) for dep in dependencies )
-    assert len(self.dependencies) == len(self.distributions) and \
-           all( len(dep) == len(set(dep)) for dep in self.dependencies )
-    assert all( len(dep) == len(dist) for dep, dist in zip(self.dependencies,
-                                                           self.distributions) )
-    depunion = set.union(*map(set, self.dependencies))
-    assert depunion == set(range(len(depunion)))
-
-  def __len__(self):
-    return len(self.distributions)
+  def __init__(self, distributions: Sequence[ClosedFormDistribution]) -> None:
+    self.distributions = tuple(map(as_distribution, distributions))
+    assert self.shape, "At least one distribution must be provided."
 
   @property
   def shape(self):
-    return len(self),
+    return len(self.distributions),
 
   @cached_property
   def pdf(self):
-    def _pdf(x):
-      return np.stack([ dist.pdf(x[..., dep])
-                        for dist, dep in zip(self.distributions,
-                                             self.dependencies) ], axis=-1)
-    return _pdf
+    raise NotImplementedError("PDF is not implemented for vectorial distributions.")
+
+  def __getitem__(self, index) -> 'VectorialDistribution' | ClosedFormDistribution:
+    ret = self.distributions[index]
+    if isinstance(ret, tuple):
+      return VectorialDistribution(ret)
+    return ret
 
   def _sample(self, size: Int) -> np.ndarray:
-    samples = [ dist.sample(size) for dist in self.distributions ]
-    return np.stack(samples, axis=-1)
+    """
+    Sample from the tensorial distribution.
+    """
+    return np.stack([dist.sample(size) for dist in self.distributions.flat], axis=-1)
 
   def _raw_moment(self, order: Int) -> Float:
-    return np.array([ dist.raw_moment(order) for dist in self.distributions ])
-
-
-if __name__ == '__main__':
-  d0 = Normal(0, 1) @ LogNormal.from_mean_std(5, 1)
-  d1 = Uniform(0, 1) @ LogNormal.from_mean_std(1, .1)
-  d2 = Uniform(0, 1) @ Beta(5, 1)
-
-  dist = VectorialDistribution([d0, d1, d2])
-  dist.sample(10)
-
-  import ipdb
-  ipdb.set_trace()
+    """
+    Return the raw moments of the vectorial distribution.
+    """
+    return np.prod([dist.raw_moment(order) for dist in self.distributions])
