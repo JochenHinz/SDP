@@ -4,11 +4,13 @@ from opt import RewardTransitionFunction, DiscreteSpace, \
                 StochasticDynamicProgrammingProblem
 from dist import VectorialDistribution, LogNormal, Geometric, Poisson, \
                  Bernoulli
+from log import logger as log
 
 from typing import Tuple
 from collections import namedtuple
 
 from numpy.typing import NDArray
+from numba import njit
 
 
 """
@@ -81,6 +83,7 @@ def reward_transition_function(inventory_parameters: InventoryParameters) -> Rew
   production_capacity, resource_storage_cost, product_storage_cost, \
   production_cost, selling_price, tariff_rate = inventory_parameters
 
+  @njit(cache=True, fastmath=True)
   def reward_transition(xk, uk, wk) -> Tuple[Float | NDArray, Float | NDArray]:
     # TODO: vectorize or use numba for performance
 
@@ -120,7 +123,7 @@ def reward_transition_function(inventory_parameters: InventoryParameters) -> Rew
     resource_cost, energy_cost, resource_delay, demand, tariff = wk
 
     # We cannot sell more than the demand or the number of available products.
-    amount_sold = np.min([sell, products, demand])
+    amount_sold = min(sell, products, demand)
 
     # The number of products is immediately reduced by the number of products
     # sold.
@@ -128,21 +131,21 @@ def reward_transition_function(inventory_parameters: InventoryParameters) -> Rew
 
     # We can buy as many resources as we please, capped by the resource
     # inventory capacity.
-    resources_bought = np.min([buy, resource_inventory_capacity - resources])
+    resources_bought = min(buy, resource_inventory_capacity - resources)
 
     # the resources available to us for overnight production
     new_resources = resources + buy
 
     # we can produce as much as can be produced overnight (production capacity)
     # and as much as we have resources for.
-    amount_produced = np.min([produce, production_capacity, new_resources])
+    amount_produced = min(produce, production_capacity, new_resources)
 
     # The next state is given by [new_resources - amount_produced,
     #                             new_products + amount_produced]
     next_resources = new_resources - amount_produced
     next_products = new_products + amount_produced
 
-    Xk1 = np.array([next_resources, next_products], dtype=int)
+    Xk1 = np.array([next_resources, next_products], dtype=np.int64)
 
     # The immediate reward is given by
     reward = selling_price * amount_sold * (1 - tariff * tariff_rate) - \
@@ -196,14 +199,16 @@ def create_control_space(inventory_parameters: InventoryParameters,
 
 if __name__ == '__main__':
 
+  horizon = 6
+
   inventory = create_inventory(
       resource_inventory_capacity=50,
-      product_inventory_capacity=100,
+      product_inventory_capacity=50,
       production_capacity=10,
       resource_storage_cost=2.0,
       product_storage_cost=4.0,
       production_cost=5.0,
-      selling_price=20.0,
+      selling_price=30.0,
       tariff_rate=.3
   )
 
@@ -214,15 +219,42 @@ if __name__ == '__main__':
                                 lambda_demand=10,  # Demand rate
                                 p_tariff=.1)       # Tariff on / off rate
 
-  state_space = create_state_space(inventory, 2, 2)
-  control_space = create_state_space(inventory, 2, 2)
+  state_space = create_state_space(inventory, 5, 10)
+  print("The state space has {} elemens.".format(state_space.nelems))
+
+  control_space = create_control_space(inventory, 5, 5, 2)
+  print("The control space has {} elements".format(control_space.nelems))
 
   # Example usage
   dp_problem = \
     StochasticDynamicProgrammingProblem(stochastic_variables,
                                         reward_transition_function(inventory),
                                         state_space,
-                                        control_space)
+                                        control_space,
+                                        stochastic_variable_names=('resource_cost',
+                                                                   'energy_cost',
+                                                                   'resource_delay',
+                                                                   'demand_rate',
+                                                                   'tariff'))
 
-  import ipdb
-  ipdb.set_trace()
+  rewards = [dp_problem.create_salvage_function(lambda xk: 2 * xk.sum())]  # Salvage function, can be 0 or a function
+  policy_functions = []
+
+  for i in range(horizon):
+    policy, reward = dp_problem.markov_step(rewards[-1])
+    policy_functions.append(policy)
+    rewards.append(reward)
+
+  # turn both around
+  policy_functions.reverse()
+  rewards.reverse()
+
+  xk_names = 'resource_inventory', 'product_inventory'
+  uk_names = 'sell_products', 'buy_resources', 'produce_products'
+
+  nrealizations = 10
+  for i in range(nrealizations):
+    log.warning(f"plotting realization {i + 1} of {nrealizations}")
+
+    # we assume that we start with empty resource and product inventory
+    dp_problem.realize([0, 0], policy_functions, xk_names, uk_names)

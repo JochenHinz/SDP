@@ -453,6 +453,7 @@ class VectorialDistribution(Distribution):
   def __init__(self, distributions: Sequence[ClosedFormDistribution]) -> None:
     self.distributions = tuple(map(as_distribution, distributions))
     assert self.shape, "At least one distribution must be provided."
+    self.ndim = len(self.distributions)
 
   @property
   def shape(self):
@@ -462,7 +463,7 @@ class VectorialDistribution(Distribution):
   def pdf(self):
     raise NotImplementedError("PDF is not implemented for vectorial distributions.")
 
-  def __getitem__(self, index) -> 'VectorialDistribution' | ClosedFormDistribution:
+  def __getitem__(self, index):
     ret = self.distributions[index]
     if isinstance(ret, tuple):
       return VectorialDistribution(ret)
@@ -472,7 +473,7 @@ class VectorialDistribution(Distribution):
     """
     Sample from the tensorial distribution.
     """
-    return np.stack([dist.sample(size) for dist in self.distributions.flat], axis=-1)
+    return np.stack([dist.sample(size) for dist in self.distributions], axis=-1)
 
   def _raw_moment(self, order: Int) -> Float:
     """
